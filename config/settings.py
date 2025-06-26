@@ -35,6 +35,9 @@ class Settings:
     # Audit Logging
     AUDIT_LOG_RETENTION_DAYS: int = int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "2555"))
     
+    # Development settings
+    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
+    
     @classmethod
     def validate_required_settings(cls) -> list[str]:
         """Validate that all required settings are present"""
@@ -60,7 +63,7 @@ class Settings:
     @classmethod
     def is_development(cls) -> bool:
         """Check if running in development environment"""
-        return os.getenv("ENVIRONMENT", "development").lower() == "development"
+        return cls.ENVIRONMENT.lower() == "development"
 
 # Global settings instance
 settings = Settings()
