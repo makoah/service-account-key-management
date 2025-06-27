@@ -39,7 +39,7 @@
   - [x] 3.2 Create methods for storing and retrieving private keys
   - [x] 3.3 Add metadata storage and retrieval functionality
   - [x] 3.4 Implement key listing and deletion operations
-- [ ] 4.0 Create Snowflake integration for public key management
+- [x] 4.0 Create Snowflake integration for public key management
   - [x] 4.1 Set up Snowflake connection with service account
   - [x] 4.2 Implement public key update functionality for users
   - [x] 4.3 Add error handling for Snowflake operations
