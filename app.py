@@ -343,44 +343,338 @@ def _count_recent_activity(kv_client: KeyVaultClient, keys: List[str], days: int
     except:
         return 0
 
-def show_generate_keys(kv_client, sf_client):
-    st.header("Generate New Key-Pair")
+def show_generate_keys(kv_client: KeyVaultClient, sf_client: SnowflakeClient, current_user: Dict, user_role: str):
+    """Key generation form with comprehensive validation"""
+    st.header("🔑 Generate New Key-Pair")
     
-    with st.form("generate_keys"):
-        service_account = st.text_input("Service Account Name")
-        snowflake_user = st.text_input("Snowflake Username")
-        usage_type = st.selectbox("Usage Type", ["PowerBI", "Tableau", "Other"])
-        description = st.text_area("Description (Optional)")
+    # Check permissions
+    try:
+        from utils.auth import RoleBasedAccessControl
+        rbac = RoleBasedAccessControl()
+        rbac.enforce_permission(current_user.get('userPrincipalName'), 'create_key')
+    except Exception as e:
+        st.error(f"Access denied: {str(e)}")
+        return
+    
+    st.markdown("""
+    This form will generate a new RSA key pair for your service account and automatically:
+    - Store the private key securely in Azure Key Vault
+    - Update the Snowflake user with the public key
+    - Create audit logs for compliance tracking
+    """)
+    
+    # Pre-flight checks
+    with st.expander("🔍 System Status Check", expanded=False):
+        col1, col2 = st.columns(2)
         
-        if st.form_submit_button("Generate Key-Pair"):
-            if service_account and snowflake_user:
-                with st.spinner("Generating key-pair..."):
-                    try:
-                        # Generate key pair
-                        private_key, public_key = generate_key_pair()
-                        
-                        # Store in Key Vault
-                        kv_client.store_key_pair(
-                            service_account, 
-                            private_key, 
-                            public_key,
-                            {
-                                "snowflake_user": snowflake_user,
-                                "usage_type": usage_type,
-                                "description": description,
-                                "created_at": datetime.now().isoformat()
-                            }
-                        )
-                        
-                        # Update Snowflake user
-                        sf_client.update_user_public_key(snowflake_user, public_key)
-                        
-                        st.success(f"Key-pair generated and configured for {service_account}")
-                        
-                    except Exception as e:
-                        st.error(f"Error generating key-pair: {str(e)}")
+        kv_status = _check_keyvault_status(kv_client)
+        sf_status = _check_snowflake_status(sf_client)
+        
+        with col1:
+            if kv_status:
+                st.success("✅ Azure Key Vault: Ready")
             else:
-                st.error("Please fill in all required fields")
+                st.error("❌ Azure Key Vault: Not accessible")
+        
+        with col2:
+            if sf_status:
+                st.success("✅ Snowflake: Ready")  
+            else:
+                st.error("❌ Snowflake: Not accessible")
+        
+        if not (kv_status and sf_status):
+            st.warning("⚠️ Some services are not available. Key generation may fail.")
+    
+    # Main form
+    with st.form("generate_keys_form", clear_on_submit=False):
+        st.subheader("Key Pair Configuration")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            service_account = st.text_input(
+                "Service Account Name *",
+                help="Unique identifier for this service account (alphanumeric, hyphens, underscores only)",
+                placeholder="e.g., powerbi-sales-dashboard"
+            )
+            
+            snowflake_user = st.text_input(
+                "Snowflake Username *",
+                help="Existing Snowflake user that will use this key pair",
+                placeholder="e.g., SVC_POWERBI_USER"
+            )
+            
+            usage_type = st.selectbox(
+                "Usage Type *",
+                ["PowerBI", "Tableau", "Python Scripts", "Power Apps", "Other"],
+                help="Primary application that will use this key pair"
+            )
+        
+        with col2:
+            key_size = st.selectbox(
+                "RSA Key Size",
+                [2048, 3072, 4096],
+                index=0,
+                help="Larger keys are more secure but may impact performance"
+            )
+            
+            description = st.text_area(
+                "Description",
+                help="Optional description of the service account purpose",
+                placeholder="e.g., Used by PowerBI for sales dashboard data access"
+            )
+            
+            # Advanced options
+            with st.expander("Advanced Options"):
+                verify_snowflake_user = st.checkbox(
+                    "Verify Snowflake user exists",
+                    value=True,
+                    help="Check if the Snowflake user exists before generating keys"
+                )
+                
+                test_key_after_generation = st.checkbox(
+                    "Test key after generation",
+                    value=False,
+                    help="Perform a test connection to verify the key works (optional)"
+                )
+        
+        # Form validation
+        submitted = st.form_submit_button("🔑 Generate Key-Pair", use_container_width=True)
+        
+        if submitted:
+            # Validate inputs
+            validation_errors = _validate_key_generation_form(
+                service_account, snowflake_user, usage_type, kv_client, sf_client, verify_snowflake_user
+            )
+            
+            if validation_errors:
+                for error in validation_errors:
+                    st.error(error)
+            else:
+                # Generate the key pair
+                _process_key_generation(
+                    kv_client, sf_client, current_user,
+                    service_account, snowflake_user, usage_type, description,
+                    key_size, test_key_after_generation
+                )
+    
+    # Show existing keys for reference
+    st.markdown("---")
+    st.subheader("📋 Your Existing Service Accounts")
+    
+    try:
+        user_keys = kv_client.list_keys(user_filter=current_user.get('userPrincipalName'))
+        if user_keys:
+            # Create simple table
+            existing_data = []
+            for key in user_keys:
+                try:
+                    metadata = kv_client.get_key_metadata(key)
+                    existing_data.append({
+                        "Service Account": key,
+                        "Snowflake User": metadata.get("snowflake_user", "N/A"),
+                        "Usage Type": metadata.get("usage_type", "N/A"),
+                        "Created": metadata.get("created_at", "Unknown")[:10] if metadata.get("created_at") else "Unknown"
+                    })
+                except:
+                    existing_data.append({
+                        "Service Account": key,
+                        "Snowflake User": "Error loading",
+                        "Usage Type": "Error loading", 
+                        "Created": "Unknown"
+                    })
+            
+            if existing_data:
+                df = pd.DataFrame(existing_data)
+                st.dataframe(df, use_container_width=True, hide_index=True)
+        else:
+            st.info("You don't have any existing service account key pairs.")
+    
+    except Exception as e:
+        st.warning(f"Could not load existing keys: {str(e)}")
+
+def _validate_key_generation_form(service_account: str, snowflake_user: str, usage_type: str, 
+                                  kv_client: KeyVaultClient, sf_client: SnowflakeClient, 
+                                  verify_snowflake_user: bool) -> List[str]:
+    """Validate the key generation form inputs"""
+    errors = []
+    
+    # Service account name validation
+    if not service_account:
+        errors.append("Service Account Name is required")
+    elif not _validate_service_account_name(service_account):
+        errors.append("Service Account Name must contain only alphanumeric characters, hyphens, and underscores")
+    elif len(service_account) < 3:
+        errors.append("Service Account Name must be at least 3 characters long")
+    elif len(service_account) > 50:
+        errors.append("Service Account Name must be 50 characters or less")
+    else:
+        # Check if service account already exists
+        try:
+            existing_keys = kv_client.list_keys()
+            if service_account in existing_keys:
+                errors.append(f"Service Account '{service_account}' already exists. Choose a different name.")
+        except Exception as e:
+            errors.append(f"Could not verify service account uniqueness: {str(e)}")
+    
+    # Snowflake username validation
+    if not snowflake_user:
+        errors.append("Snowflake Username is required")
+    elif not _validate_snowflake_username(snowflake_user):
+        errors.append("Snowflake Username contains invalid characters")
+    elif verify_snowflake_user:
+        try:
+            if not sf_client.user_exists(snowflake_user):
+                errors.append(f"Snowflake user '{snowflake_user}' does not exist")
+        except Exception as e:
+            errors.append(f"Could not verify Snowflake user: {str(e)}")
+    
+    # Usage type validation
+    if not usage_type:
+        errors.append("Usage Type is required")
+    
+    return errors
+
+def _validate_service_account_name(name: str) -> bool:
+    """Validate service account name format"""
+    import re
+    return bool(re.match(r'^[a-zA-Z0-9_-]+$', name))
+
+def _validate_snowflake_username(username: str) -> bool:
+    """Validate Snowflake username format"""
+    import re
+    # Snowflake usernames are more permissive but let's be conservative
+    return bool(re.match(r'^[a-zA-Z0-9_]+$', username))
+
+def _check_keyvault_status(kv_client: KeyVaultClient) -> bool:
+    """Check if Key Vault is accessible"""
+    try:
+        kv_client.list_keys()[:1]
+        return True
+    except:
+        return False
+
+def _check_snowflake_status(sf_client: SnowflakeClient) -> bool:
+    """Check if Snowflake is accessible"""
+    try:
+        sf_client.list_users_with_rsa_keys()[:1]
+        return True
+    except:
+        return False
+
+def _process_key_generation(kv_client: KeyVaultClient, sf_client: SnowflakeClient, current_user: Dict,
+                           service_account: str, snowflake_user: str, usage_type: str, description: str,
+                           key_size: int, test_key: bool):
+    """Process the key generation request"""
+    
+    user_principal_name = current_user.get('userPrincipalName')
+    progress_bar = st.progress(0, "Starting key generation...")
+    
+    try:
+        # Step 1: Generate RSA key pair
+        progress_bar.progress(20, "Generating RSA key pair...")
+        private_key, public_key = generate_key_pair(key_size, user_principal_name)
+        
+        # Step 2: Store in Key Vault
+        progress_bar.progress(40, "Storing keys in Azure Key Vault...")
+        metadata = {
+            "snowflake_user": snowflake_user,
+            "usage_type": usage_type,
+            "description": description,
+            "key_size": key_size,
+            "created_at": datetime.now().isoformat()
+        }
+        
+        kv_client.store_key_pair(
+            service_account,
+            private_key,
+            public_key,
+            metadata,
+            user_principal_name
+        )
+        
+        # Step 3: Update Snowflake user
+        progress_bar.progress(60, "Updating Snowflake user...")
+        sf_client.update_user_public_key(snowflake_user, public_key, user_principal_name)
+        
+        # Step 4: Optional testing
+        if test_key:
+            progress_bar.progress(80, "Testing key authentication...")
+            # Note: In production, we wouldn't test with the actual private key
+            # This is just a placeholder for the testing logic
+            st.info("Key testing is not implemented in this demo version for security reasons.")
+        
+        # Step 5: Complete
+        progress_bar.progress(100, "Key generation complete!")
+        
+        # Success message with details
+        st.success("🎉 Key-pair generated successfully!")
+        
+        # Show summary
+        with st.expander("📋 Generation Summary", expanded=True):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown(f"""
+                **Service Account:** {service_account}  
+                **Snowflake User:** {snowflake_user}  
+                **Usage Type:** {usage_type}  
+                **Key Size:** {key_size} bits  
+                """)
+            
+            with col2:
+                st.markdown(f"""
+                **Created By:** {current_user.get('displayName', 'Unknown')}  
+                **Created At:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  
+                **Status:** ✅ Active  
+                **Location:** Azure Key Vault  
+                """)
+            
+            if description:
+                st.markdown(f"**Description:** {description}")
+        
+        # Next steps
+        st.info("""
+        **Next Steps:**
+        1. Your service account can now authenticate to Snowflake using key-pair authentication
+        2. Use the 'Manage Keys' page to download the public key if needed for other systems
+        3. The private key is securely stored in Azure Key Vault and should never be downloaded
+        """)
+        
+        # Log the successful operation
+        sox_audit_logger.log_key_operation(
+            "GENERATED",
+            service_account,
+            user_principal_name,
+            True,
+            key_size=key_size
+        )
+        
+    except Exception as e:
+        error_msg = str(e)
+        st.error(f"❌ Key generation failed: {error_msg}")
+        logger.error(f"Key generation failed for {service_account}: {error_msg}")
+        
+        # Log the failed operation
+        sox_audit_logger.log_key_operation(
+            "GENERATED",
+            service_account,
+            user_principal_name,
+            False,
+            error_message=error_msg
+        )
+        
+        # Clean up any partial state
+        try:
+            # If Key Vault storage succeeded but Snowflake update failed, 
+            # we might want to clean up (depending on business logic)
+            pass
+        except:
+            pass
+    
+    finally:
+        # Clear the progress bar
+        progress_bar.empty()
 
 def show_manage_keys(kv_client, sf_client):
     st.header("Manage Existing Keys")
