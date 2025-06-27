@@ -40,10 +40,10 @@
   - [x] 3.3 Add metadata storage and retrieval functionality
   - [x] 3.4 Implement key listing and deletion operations
 - [ ] 4.0 Create Snowflake integration for public key management
-  - [ ] 4.1 Set up Snowflake connection with service account
-  - [ ] 4.2 Implement public key update functionality for users
-  - [ ] 4.3 Add error handling for Snowflake operations
-  - [ ] 4.4 Create validation for Snowflake user existence
+  - [x] 4.1 Set up Snowflake connection with service account
+  - [x] 4.2 Implement public key update functionality for users
+  - [x] 4.3 Add error handling for Snowflake operations
+  - [x] 4.4 Create validation for Snowflake user existence
 - [ ] 5.0 Develop RSA key generation and cryptographic utilities
   - [ ] 5.1 Implement RSA key pair generation (2048-bit minimum)
   - [ ] 5.2 Add key format conversion utilities (PEM format)
