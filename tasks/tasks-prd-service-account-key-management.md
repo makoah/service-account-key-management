@@ -44,7 +44,7 @@
   - [x] 4.2 Implement public key update functionality for users
   - [x] 4.3 Add error handling for Snowflake operations
   - [x] 4.4 Create validation for Snowflake user existence
-- [ ] 5.0 Develop RSA key generation and cryptographic utilities
+- [x] 5.0 Develop RSA key generation and cryptographic utilities
   - [x] 5.1 Implement RSA key pair generation (2048-bit minimum)
   - [x] 5.2 Add key format conversion utilities (PEM format)
   - [x] 5.3 Create key validation functions
