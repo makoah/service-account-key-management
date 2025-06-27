@@ -35,10 +35,10 @@
   - [x] 2.3 Create user session management
   - [x] 2.4 Add authorization checks for service account access
 - [ ] 3.0 Build Azure Key Vault integration for secure key storage
-  - [ ] 3.1 Implement Key Vault client with proper authentication
-  - [ ] 3.2 Create methods for storing and retrieving private keys
-  - [ ] 3.3 Add metadata storage and retrieval functionality
-  - [ ] 3.4 Implement key listing and deletion operations
+  - [x] 3.1 Implement Key Vault client with proper authentication
+  - [x] 3.2 Create methods for storing and retrieving private keys
+  - [x] 3.3 Add metadata storage and retrieval functionality
+  - [x] 3.4 Implement key listing and deletion operations
 - [ ] 4.0 Create Snowflake integration for public key management
   - [ ] 4.1 Set up Snowflake connection with service account
   - [ ] 4.2 Implement public key update functionality for users
