@@ -45,10 +45,10 @@
   - [x] 4.3 Add error handling for Snowflake operations
   - [x] 4.4 Create validation for Snowflake user existence
 - [ ] 5.0 Develop RSA key generation and cryptographic utilities
-  - [ ] 5.1 Implement RSA key pair generation (2048-bit minimum)
-  - [ ] 5.2 Add key format conversion utilities (PEM format)
-  - [ ] 5.3 Create key validation functions
-  - [ ] 5.4 Add secure key handling and cleanup
+  - [x] 5.1 Implement RSA key pair generation (2048-bit minimum)
+  - [x] 5.2 Add key format conversion utilities (PEM format)
+  - [x] 5.3 Create key validation functions
+  - [x] 5.4 Add secure key handling and cleanup
 - [ ] 6.0 Implement SOX compliance audit logging
   - [ ] 6.1 Create audit logger with structured logging
   - [ ] 6.2 Implement logging for all key operations (CRUD)
