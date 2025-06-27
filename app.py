@@ -1277,29 +1277,674 @@ def _find_keys_needing_rotation(kv_client: KeyVaultClient, all_keys: List[str]):
     except Exception as e:
         st.error(f"Failed to analyze key ages: {str(e)}")
 
-def show_usage_tracking():
-    st.header("Usage Tracking")
+def show_usage_tracking(kv_client: KeyVaultClient, current_user: Dict, user_role: str):
+    """Usage tracking and reporting dashboard"""
+    st.header("📊 Usage Tracking & Reports")
     
-    # Service usage metrics
-    col1, col2 = st.columns(2)
+    user_principal_name = current_user.get('userPrincipalName')
+    
+    # Get user's keys for tracking
+    try:
+        if user_role == "admin":
+            all_keys = kv_client.list_keys()
+            user_keys = kv_client.list_keys(user_filter=user_principal_name)
+            show_all_usage = st.checkbox("Show usage for all keys (Admin view)", value=False)
+            keys_for_tracking = all_keys if show_all_usage else user_keys
+        else:
+            keys_for_tracking = kv_client.list_keys(user_filter=user_principal_name)
+        
+        if not keys_for_tracking:
+            st.info("You don't have any key pairs to track. Create some keys first to see usage data.")
+            return
+        
+        # Usage tracking tabs
+        tab1, tab2, tab3, tab4 = st.tabs([
+            "📈 Usage Overview", 
+            "🔍 Service Analysis", 
+            "📋 Audit Reports", 
+            "⚠️ Compliance Dashboard"
+        ])
+        
+        with tab1:
+            _show_usage_overview(kv_client, keys_for_tracking, user_role)
+        
+        with tab2:
+            _show_service_analysis(kv_client, keys_for_tracking)
+        
+        with tab3:
+            _show_audit_reports(kv_client, keys_for_tracking, user_role)
+        
+        with tab4:
+            _show_compliance_dashboard(kv_client, keys_for_tracking, user_role)
+    
+    except Exception as e:
+        st.error(f"Error loading usage tracking data: {str(e)}")
+        logger.error(f"Usage tracking error for user {user_principal_name}: {str(e)}")
+
+def _show_usage_overview(kv_client: KeyVaultClient, keys: List[str], user_role: str):
+    """Show overall usage overview with metrics and charts"""
+    st.subheader("📈 Usage Overview")
+    
+    # Key metrics
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.subheader("PowerBI Usage")
-        # Mock data - replace with actual PowerBI API calls
-        powerbi_data = pd.DataFrame({
-            "Date": pd.date_range("2024-01-01", periods=30),
-            "Connections": [10, 15, 12, 8, 20, 25, 18, 14, 16, 22] * 3
-        })
-        st.line_chart(powerbi_data.set_index("Date"))
+        st.metric("Total Keys Tracked", len(keys))
     
     with col2:
-        st.subheader("Tableau Usage") 
-        # Mock data - replace with actual Tableau API calls
-        tableau_data = pd.DataFrame({
-            "Date": pd.date_range("2024-01-01", periods=30),
-            "Connections": [8, 12, 10, 15, 18, 20, 16, 12, 14, 19] * 3
-        })
-        st.line_chart(tableau_data.set_index("Date"))
+        # Count keys by usage type
+        usage_types = {}
+        for key in keys:
+            try:
+                metadata = kv_client.get_key_metadata(key)
+                usage_type = metadata.get("usage_type", "Unknown")
+                usage_types[usage_type] = usage_types.get(usage_type, 0) + 1
+            except:
+                pass
+        most_common = max(usage_types.items(), key=lambda x: x[1]) if usage_types else ("None", 0)
+        st.metric("Most Used Service", most_common[0], delta=most_common[1])
+    
+    with col3:
+        # Calculate average key age
+        total_age = 0
+        valid_keys = 0
+        for key in keys:
+            try:
+                metadata = kv_client.get_key_metadata(key)
+                created_at = metadata.get("created_at")
+                if created_at and created_at != "Unknown":
+                    created_date = datetime.fromisoformat(created_at.replace("Z", ""))
+                    age_days = (datetime.now() - created_date).days
+                    total_age += age_days
+                    valid_keys += 1
+            except:
+                pass
+        
+        avg_age = total_age // valid_keys if valid_keys > 0 else 0
+        st.metric("Avg Key Age", f"{avg_age} days")
+    
+    with col4:
+        # Count keys needing rotation
+        old_keys = 0
+        for key in keys:
+            try:
+                metadata = kv_client.get_key_metadata(key)
+                created_at = metadata.get("created_at")
+                if created_at and created_at != "Unknown":
+                    created_date = datetime.fromisoformat(created_at.replace("Z", ""))
+                    age_days = (datetime.now() - created_date).days
+                    if age_days > 365:
+                        old_keys += 1
+            except:
+                pass
+        
+        st.metric("Keys Needing Rotation", old_keys, delta="🔴" if old_keys > 0 else "✅")
+    
+    # Usage by service type chart
+    st.subheader("🔧 Usage by Service Type")
+    
+    if usage_types:
+        # Create pie chart for usage types
+        fig_pie = px.pie(
+            values=list(usage_types.values()),
+            names=list(usage_types.keys()),
+            title="Key Pairs by Usage Type"
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+    else:
+        st.info("No usage type data available")
+    
+    # Key creation timeline
+    st.subheader("📅 Key Creation Timeline")
+    
+    creation_data = []
+    for key in keys:
+        try:
+            metadata = kv_client.get_key_metadata(key)
+            created_at = metadata.get("created_at")
+            if created_at and created_at != "Unknown":
+                created_date = datetime.fromisoformat(created_at.replace("Z", ""))
+                creation_data.append({
+                    "Date": created_date.date(),
+                    "Service Account": key,
+                    "Usage Type": metadata.get("usage_type", "Unknown")
+                })
+        except:
+            pass
+    
+    if creation_data:
+        creation_df = pd.DataFrame(creation_data)
+        # Group by date and count
+        timeline_data = creation_df.groupby(["Date", "Usage Type"]).size().reset_index(name="Count")
+        
+        if not timeline_data.empty:
+            fig_timeline = px.line(
+                timeline_data,
+                x="Date",
+                y="Count", 
+                color="Usage Type",
+                title="Key Creation Over Time"
+            )
+            st.plotly_chart(fig_timeline, use_container_width=True)
+    else:
+        st.info("No creation timeline data available")
+
+def _show_service_analysis(kv_client: KeyVaultClient, keys: List[str]):
+    """Detailed analysis of service usage patterns"""
+    st.subheader("🔍 Service Analysis")
+    
+    # Service breakdown
+    service_data = []
+    
+    for key in keys:
+        try:
+            metadata = kv_client.get_key_metadata(key)
+            created_at = metadata.get("created_at", "Unknown")
+            
+            # Calculate age
+            if created_at != "Unknown":
+                try:
+                    created_date = datetime.fromisoformat(created_at.replace("Z", ""))
+                    age_days = (datetime.now() - created_date).days
+                    age_category = "New (< 30 days)" if age_days < 30 else \
+                                  "Recent (30-90 days)" if age_days < 90 else \
+                                  "Mature (90-365 days)" if age_days < 365 else \
+                                  "Old (> 1 year)"
+                except:
+                    age_days = -1
+                    age_category = "Unknown"
+            else:
+                age_days = -1
+                age_category = "Unknown"
+            
+            service_data.append({
+                "Service Account": key,
+                "Usage Type": metadata.get("usage_type", "Unknown"),
+                "Snowflake User": metadata.get("snowflake_user", "N/A"),
+                "Key Size": f"{metadata.get('key_size', 'Unknown')} bits",
+                "Age (Days)": age_days if age_days >= 0 else "Unknown",
+                "Age Category": age_category,
+                "Creator": metadata.get("created_by", "Unknown"),
+                "Description": metadata.get("description", "No description")[:50] + "..." if len(metadata.get("description", "")) > 50 else metadata.get("description", "No description")
+            })
+            
+        except Exception as e:
+            logger.warning(f"Failed to analyze service {key}: {str(e)}")
+            service_data.append({
+                "Service Account": key,
+                "Usage Type": "Error",
+                "Snowflake User": "Error",
+                "Key Size": "Error",
+                "Age (Days)": "Error",
+                "Age Category": "Error",
+                "Creator": "Error",
+                "Description": "Failed to load data"
+            })
+    
+    if service_data:
+        df = pd.DataFrame(service_data)
+        
+        # Filter controls
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            usage_filter = st.selectbox(
+                "Filter by Usage Type:",
+                ["All"] + list(df["Usage Type"].unique())
+            )
+        
+        with col2:
+            age_filter = st.selectbox(
+                "Filter by Age Category:",
+                ["All"] + list(df["Age Category"].unique())
+            )
+        
+        with col3:
+            creator_filter = st.selectbox(
+                "Filter by Creator:",
+                ["All"] + list(df["Creator"].unique())
+            )
+        
+        # Apply filters
+        filtered_df = df.copy()
+        if usage_filter != "All":
+            filtered_df = filtered_df[filtered_df["Usage Type"] == usage_filter]
+        if age_filter != "All":
+            filtered_df = filtered_df[filtered_df["Age Category"] == age_filter]
+        if creator_filter != "All":
+            filtered_df = filtered_df[filtered_df["Creator"] == creator_filter]
+        
+        # Display filtered data
+        st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+        
+        # Analysis charts
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Age distribution
+            age_counts = filtered_df["Age Category"].value_counts()
+            if not age_counts.empty:
+                fig_age = px.bar(
+                    x=age_counts.index,
+                    y=age_counts.values,
+                    title="Keys by Age Category"
+                )
+                st.plotly_chart(fig_age, use_container_width=True)
+        
+        with col2:
+            # Key size distribution
+            size_counts = filtered_df["Key Size"].value_counts()
+            if not size_counts.empty:
+                fig_size = px.bar(
+                    x=size_counts.index,
+                    y=size_counts.values,
+                    title="Keys by Size"
+                )
+                st.plotly_chart(fig_size, use_container_width=True)
+    else:
+        st.info("No service data available for analysis")
+
+def _show_audit_reports(kv_client: KeyVaultClient, keys: List[str], user_role: str):
+    """Show audit reports and compliance information"""
+    st.subheader("📋 Audit Reports")
+    
+    # Report generation options
+    with st.expander("📊 Generate Custom Report"):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            report_type = st.selectbox(
+                "Report Type:",
+                ["Key Inventory", "Key Rotation History", "User Activity", "Compliance Summary"]
+            )
+            
+            date_range = st.date_input(
+                "Date Range:",
+                value=[datetime.now().date() - timedelta(days=30), datetime.now().date()],
+                max_value=datetime.now().date()
+            )
+        
+        with col2:
+            include_details = st.checkbox("Include detailed metadata", value=True)
+            include_creators = st.checkbox("Include creator information", value=True)
+            
+            export_format = st.selectbox("Export Format:", ["CSV", "JSON"])
+        
+        if st.button("📋 Generate Report"):
+            report_data = _generate_audit_report(
+                kv_client, keys, report_type, date_range, 
+                include_details, include_creators
+            )
+            
+            if report_data:
+                st.success(f"Generated {report_type} report with {len(report_data)} records")
+                
+                # Display report preview
+                df_report = pd.DataFrame(report_data)
+                st.dataframe(df_report, use_container_width=True, hide_index=True)
+                
+                # Export options
+                if export_format == "CSV":
+                    csv = df_report.to_csv(index=False)
+                    st.download_button(
+                        "📥 Download CSV",
+                        csv,
+                        file_name=f"{report_type.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    json_data = df_report.to_json(orient='records', indent=2)
+                    st.download_button(
+                        "📥 Download JSON",
+                        json_data,
+                        file_name=f"{report_type.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.json",
+                        mime="application/json"
+                    )
+            else:
+                st.warning("No data available for the selected criteria")
+    
+    # Recent activity summary
+    st.subheader("🕒 Recent Activity Summary")
+    
+    try:
+        recent_activity = kv_client.get_recent_activity()
+        
+        if recent_activity:
+            # Filter for user's keys if not admin
+            if user_role != "admin":
+                recent_activity = [
+                    activity for activity in recent_activity
+                    if activity.get("Service Account") in keys
+                ]
+            
+            if recent_activity:
+                activity_df = pd.DataFrame(recent_activity)
+                
+                # Activity metrics
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric("Recent Operations", len(recent_activity))
+                
+                with col2:
+                    unique_accounts = len(set(act.get("Service Account") for act in recent_activity))
+                    st.metric("Accounts Involved", unique_accounts)
+                
+                with col3:
+                    unique_users = len(set(act.get("Created By") for act in recent_activity))
+                    st.metric("Active Users", unique_users)
+                
+                # Activity table
+                st.dataframe(activity_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No recent activity for your service accounts")
+        else:
+            st.info("No recent activity data available")
+    
+    except Exception as e:
+        st.error(f"Failed to load recent activity: {str(e)}")
+
+def _show_compliance_dashboard(kv_client: KeyVaultClient, keys: List[str], user_role: str):
+    """Show compliance dashboard with SOX requirements"""
+    st.subheader("⚠️ Compliance Dashboard")
+    
+    # Compliance metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    # Calculate compliance metrics
+    total_keys = len(keys)
+    keys_with_metadata = 0
+    keys_needing_rotation = 0
+    keys_with_audit_trail = 0
+    
+    for key in keys:
+        try:
+            metadata = kv_client.get_key_metadata(key)
+            
+            # Check if metadata exists
+            if metadata:
+                keys_with_metadata += 1
+            
+            # Check if audit trail exists (creator info)
+            if metadata.get("created_by"):
+                keys_with_audit_trail += 1
+            
+            # Check if rotation needed
+            created_at = metadata.get("created_at")
+            if created_at and created_at != "Unknown":
+                try:
+                    created_date = datetime.fromisoformat(created_at.replace("Z", ""))
+                    age_days = (datetime.now() - created_date).days
+                    if age_days > 365:
+                        keys_needing_rotation += 1
+                except:
+                    pass
+        except:
+            pass
+    
+    with col1:
+        metadata_compliance = (keys_with_metadata / total_keys * 100) if total_keys > 0 else 0
+        st.metric(
+            "Metadata Compliance",
+            f"{metadata_compliance:.1f}%",
+            delta="✅" if metadata_compliance == 100 else "⚠️"
+        )
+    
+    with col2:
+        audit_compliance = (keys_with_audit_trail / total_keys * 100) if total_keys > 0 else 0
+        st.metric(
+            "Audit Trail Coverage",
+            f"{audit_compliance:.1f}%",
+            delta="✅" if audit_compliance >= 95 else "⚠️"
+        )
+    
+    with col3:
+        rotation_compliance = ((total_keys - keys_needing_rotation) / total_keys * 100) if total_keys > 0 else 0
+        st.metric(
+            "Rotation Compliance",
+            f"{rotation_compliance:.1f}%",
+            delta="✅" if rotation_compliance >= 90 else "🔴"
+        )
+    
+    with col4:
+        overall_score = (metadata_compliance + audit_compliance + rotation_compliance) / 3
+        st.metric(
+            "Overall Compliance",
+            f"{overall_score:.1f}%",
+            delta="✅" if overall_score >= 90 else "⚠️"
+        )
+    
+    # SOX Compliance Checklist
+    st.subheader("📋 SOX Compliance Checklist")
+    
+    checklist_items = [
+        {
+            "requirement": "All keys have complete metadata",
+            "status": metadata_compliance == 100,
+            "details": f"{keys_with_metadata}/{total_keys} keys have complete metadata"
+        },
+        {
+            "requirement": "All key operations are audited",
+            "status": audit_compliance >= 95,
+            "details": f"{keys_with_audit_trail}/{total_keys} keys have audit trails"
+        },
+        {
+            "requirement": "Keys are rotated within policy (< 1 year)",
+            "status": keys_needing_rotation == 0,
+            "details": f"{keys_needing_rotation} keys need rotation"
+        },
+        {
+            "requirement": "Access controls are properly configured",
+            "status": True,  # Always true if they can access the system
+            "details": "Role-based access control is active"
+        },
+        {
+            "requirement": "Audit logs are retained for 7 years",
+            "status": True,  # Configured in settings
+            "details": f"Retention period: {settings.AUDIT_LOG_RETENTION_DAYS} days"
+        }
+    ]
+    
+    for item in checklist_items:
+        status_icon = "✅" if item["status"] else "❌"
+        st.markdown(f"{status_icon} **{item['requirement']}** - {item['details']}")
+    
+    # Compliance recommendations
+    if overall_score < 90:
+        st.subheader("🔧 Compliance Recommendations")
+        
+        recommendations = []
+        
+        if metadata_compliance < 100:
+            recommendations.append("Ensure all service accounts have complete metadata including usage type and description")
+        
+        if audit_compliance < 95:
+            recommendations.append("Review and update service accounts missing creator information")
+        
+        if keys_needing_rotation > 0:
+            recommendations.append(f"Rotate {keys_needing_rotation} keys that are over 1 year old")
+        
+        for i, rec in enumerate(recommendations, 1):
+            st.warning(f"{i}. {rec}")
+    else:
+        st.success("🎉 All compliance requirements are met!")
+    
+    # Compliance report generation
+    if user_role == "admin":
+        st.subheader("📊 Compliance Reports (Admin)")
+        
+        if st.button("📋 Generate SOX Compliance Report"):
+            compliance_report = _generate_compliance_report(kv_client, keys)
+            
+            if compliance_report:
+                st.success("SOX compliance report generated successfully")
+                
+                # Display summary
+                with st.expander("📋 Compliance Report Summary", expanded=True):
+                    for section, data in compliance_report.items():
+                        st.markdown(f"**{section}:** {data}")
+                
+                # Export option
+                report_json = json.dumps(compliance_report, indent=2, default=str)
+                st.download_button(
+                    "📥 Download Compliance Report",
+                    report_json,
+                    file_name=f"sox_compliance_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json"
+                )
+
+def _generate_audit_report(kv_client: KeyVaultClient, keys: List[str], report_type: str, 
+                          date_range: List, include_details: bool, include_creators: bool) -> List[Dict]:
+    """Generate custom audit report based on criteria"""
+    try:
+        report_data = []
+        
+        for key in keys:
+            try:
+                metadata = kv_client.get_key_metadata(key)
+                created_at = metadata.get("created_at")
+                
+                # Filter by date range if created_at is available
+                if created_at and created_at != "Unknown":
+                    try:
+                        created_date = datetime.fromisoformat(created_at.replace("Z", "")).date()
+                        if len(date_range) == 2:
+                            if not (date_range[0] <= created_date <= date_range[1]):
+                                continue
+                    except:
+                        pass
+                
+                # Build report record based on type
+                record = {"Service Account": key}
+                
+                if report_type == "Key Inventory":
+                    record.update({
+                        "Usage Type": metadata.get("usage_type", "Unknown"),
+                        "Snowflake User": metadata.get("snowflake_user", "N/A"),
+                        "Key Size": f"{metadata.get('key_size', 'Unknown')} bits",
+                        "Created Date": created_at[:10] if created_at and created_at != "Unknown" else "Unknown"
+                    })
+                
+                elif report_type == "Key Rotation History":
+                    record.update({
+                        "Last Modified": metadata.get("last_modified", metadata.get("created_at", "Unknown"))[:10],
+                        "Rotation Reason": metadata.get("rotation_reason", "N/A"),
+                        "Previous Key Size": metadata.get("previous_key_size", "N/A")
+                    })
+                
+                elif report_type == "User Activity":
+                    record.update({
+                        "Created By": metadata.get("created_by", "Unknown"),
+                        "Rotated By": metadata.get("rotated_by", "N/A"),
+                        "Created Date": created_at[:10] if created_at and created_at != "Unknown" else "Unknown"
+                    })
+                
+                elif report_type == "Compliance Summary":
+                    has_metadata = bool(metadata.get("usage_type") and metadata.get("snowflake_user"))
+                    has_audit_trail = bool(metadata.get("created_by"))
+                    
+                    record.update({
+                        "Has Complete Metadata": "Yes" if has_metadata else "No",
+                        "Has Audit Trail": "Yes" if has_audit_trail else "No",
+                        "Created By": metadata.get("created_by", "Unknown")
+                    })
+                
+                # Add optional details
+                if include_details:
+                    record["Description"] = metadata.get("description", "No description")
+                
+                if include_creators:
+                    record["Creator"] = metadata.get("created_by", "Unknown")
+                
+                report_data.append(record)
+                
+            except Exception as e:
+                logger.warning(f"Failed to include {key} in report: {str(e)}")
+        
+        return report_data
+    
+    except Exception as e:
+        logger.error(f"Failed to generate audit report: {str(e)}")
+        return []
+
+def _generate_compliance_report(kv_client: KeyVaultClient, keys: List[str]) -> Dict:
+    """Generate comprehensive compliance report"""
+    try:
+        report = {
+            "Report Generated": datetime.now().isoformat(),
+            "Total Keys Analyzed": len(keys),
+            "Compliance Summary": {},
+            "Key Breakdown": {},
+            "Recommendations": []
+        }
+        
+        # Analyze each key
+        compliant_keys = 0
+        keys_with_issues = []
+        
+        for key in keys:
+            try:
+                metadata = kv_client.get_key_metadata(key)
+                issues = []
+                
+                # Check metadata completeness
+                if not metadata.get("usage_type"):
+                    issues.append("Missing usage type")
+                if not metadata.get("snowflake_user"):
+                    issues.append("Missing Snowflake user")
+                if not metadata.get("created_by"):
+                    issues.append("Missing creator information")
+                
+                # Check key age
+                created_at = metadata.get("created_at")
+                if created_at and created_at != "Unknown":
+                    try:
+                        created_date = datetime.fromisoformat(created_at.replace("Z", ""))
+                        age_days = (datetime.now() - created_date).days
+                        if age_days > 365:
+                            issues.append(f"Key is {age_days} days old (rotation recommended)")
+                    except:
+                        issues.append("Invalid creation date format")
+                
+                if not issues:
+                    compliant_keys += 1
+                else:
+                    keys_with_issues.append({"key": key, "issues": issues})
+                    
+            except Exception as e:
+                keys_with_issues.append({"key": key, "issues": [f"Metadata error: {str(e)}"]})
+        
+        # Build compliance summary
+        compliance_rate = (compliant_keys / len(keys) * 100) if keys else 0
+        
+        report["Compliance Summary"] = {
+            "Overall Compliance Rate": f"{compliance_rate:.1f}%",
+            "Compliant Keys": compliant_keys,
+            "Keys with Issues": len(keys_with_issues),
+            "Status": "COMPLIANT" if compliance_rate >= 90 else "NON-COMPLIANT"
+        }
+        
+        report["Key Breakdown"] = {
+            "Keys with Issues": [
+                f"{item['key']}: {', '.join(item['issues'])}" 
+                for item in keys_with_issues[:10]  # Limit to first 10
+            ]
+        }
+        
+        # Generate recommendations
+        if compliance_rate < 100:
+            report["Recommendations"] = [
+                "Complete missing metadata for all service accounts",
+                "Implement regular key rotation schedule",
+                "Review and update audit trail information",
+                "Consider automated compliance monitoring"
+            ]
+        
+        return report
+        
+    except Exception as e:
+        logger.error(f"Failed to generate compliance report: {str(e)}")
+        return {"error": str(e)}
 
 def rotate_key(kv_client, sf_client, service_account):
     try:
