@@ -676,46 +676,606 @@ def _process_key_generation(kv_client: KeyVaultClient, sf_client: SnowflakeClien
         # Clear the progress bar
         progress_bar.empty()
 
-def show_manage_keys(kv_client, sf_client):
-    st.header("Manage Existing Keys")
+def show_manage_keys(kv_client: KeyVaultClient, sf_client: SnowflakeClient, current_user: Dict, user_role: str):
+    """Key management interface with rotate, delete, and download capabilities"""
+    st.header("🔧 Manage Existing Keys")
     
-    keys = kv_client.list_keys()
+    user_principal_name = current_user.get('userPrincipalName')
     
-    if not keys:
-        st.info("No key pairs found")
-        return
+    # Get user's keys (filtered for non-admins)
+    try:
+        if user_role == "admin":
+            all_keys = kv_client.list_keys()
+            user_keys = kv_client.list_keys(user_filter=user_principal_name)
+            show_all_keys = st.checkbox("Show all keys (Admin view)", value=False)
+            keys_to_display = all_keys if show_all_keys else user_keys
+        else:
+            keys_to_display = kv_client.list_keys(user_filter=user_principal_name)
+        
+        if not keys_to_display:
+            st.info("You don't have any key pairs to manage. Use the 'Generate Key-Pair' page to create one.")
+            return
+        
+        # Display keys in an enhanced table
+        st.subheader("📋 Your Service Account Keys")
+        key_data = []
+        
+        for key in keys_to_display:
+            try:
+                metadata = kv_client.get_key_metadata(key)
+                created_at = metadata.get("created_at", "Unknown")
+                
+                # Calculate age
+                if created_at != "Unknown":
+                    try:
+                        created_date = datetime.fromisoformat(created_at.replace("Z", ""))
+                        age_days = (datetime.now() - created_date).days
+                        age_str = f"{age_days} days ago"
+                    except:
+                        age_str = "Unknown"
+                else:
+                    age_str = "Unknown"
+                
+                # Determine status
+                status = "🟢 Active"
+                if age_days > 365:  # Keys older than 1 year
+                    status = "🟡 Consider Rotation"
+                elif age_days > 730:  # Keys older than 2 years
+                    status = "🔴 Rotation Needed"
+                
+                key_data.append({
+                    "Service Account": key,
+                    "Snowflake User": metadata.get("snowflake_user", "N/A"),
+                    "Usage Type": metadata.get("usage_type", "N/A"),
+                    "Created": created_at[:10] if created_at != "Unknown" else "Unknown",
+                    "Age": age_str,
+                    "Status": status,
+                    "Key Size": f"{metadata.get('key_size', 'Unknown')} bits",
+                    "Created By": metadata.get("created_by", "Unknown")
+                })
+                
+            except Exception as e:
+                logger.warning(f"Failed to get metadata for {key}: {str(e)}")
+                key_data.append({
+                    "Service Account": key,
+                    "Snowflake User": "Error",
+                    "Usage Type": "Error",
+                    "Created": "Unknown",
+                    "Age": "Unknown",
+                    "Status": "❌ Error",
+                    "Key Size": "Unknown",
+                    "Created By": "Unknown"
+                })
+        
+        df = pd.DataFrame(key_data)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        
+        # Key management actions
+        st.markdown("---")
+        st.subheader("🛠️ Key Management Actions")
+        
+        # Key selection
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            selected_key = st.selectbox(
+                "Select Service Account to Manage:",
+                keys_to_display,
+                help="Choose a service account to perform management operations"
+            )
+        
+        with col2:
+            if selected_key:
+                # Show key details
+                try:
+                    metadata = kv_client.get_key_metadata(selected_key)
+                    st.info(f"**Usage:** {metadata.get('usage_type', 'Unknown')}")
+                except:
+                    st.warning("Unable to load key details")
+        
+        if selected_key:
+            # Check permissions for selected key
+            can_manage = _can_manage_key(user_role, user_principal_name, selected_key, kv_client)
+            
+            if not can_manage:
+                st.error("You don't have permission to manage this service account.")
+                return
+            
+            # Action buttons
+            action_col1, action_col2, action_col3, action_col4 = st.columns(4)
+            
+            with action_col1:
+                if st.button("🔄 Rotate Key", use_container_width=True, help="Generate new key pair and update Snowflake"):
+                    _rotate_key_interface(kv_client, sf_client, selected_key, current_user)
+            
+            with action_col2:
+                if st.button("📥 Download Public Key", use_container_width=True, help="Download public key file"):
+                    _download_public_key_interface(kv_client, selected_key, current_user)
+            
+            with action_col3:
+                if st.button("📋 View Details", use_container_width=True, help="View detailed key information"):
+                    _view_key_details_interface(kv_client, selected_key)
+            
+            with action_col4:
+                if st.button("🗑️ Delete Key", use_container_width=True, type="secondary", help="Permanently delete key pair"):
+                    _delete_key_interface(kv_client, sf_client, selected_key, current_user)
+        
+        # Bulk operations (admin only)
+        if user_role == "admin" and show_all_keys:
+            st.markdown("---")
+            st.subheader("🔧 Bulk Operations (Admin)")
+            
+            bulk_col1, bulk_col2 = st.columns(2)
+            
+            with bulk_col1:
+                if st.button("📊 Generate Key Report"):
+                    _generate_key_report(kv_client, all_keys)
+            
+            with bulk_col2:
+                if st.button("⚠️ Find Keys Needing Rotation"):
+                    _find_keys_needing_rotation(kv_client, all_keys)
     
-    # Display keys in a table
-    key_data = []
-    for key in keys:
-        metadata = kv_client.get_key_metadata(key)
-        key_data.append({
-            "Service Account": key,
-            "Snowflake User": metadata.get("snowflake_user", "N/A"),
-            "Usage Type": metadata.get("usage_type", "N/A"),
-            "Created": metadata.get("created_at", "N/A")
-        })
+    except Exception as e:
+        st.error(f"Error loading keys: {str(e)}")
+        logger.error(f"Key management error for user {user_principal_name}: {str(e)}")
+
+def _can_manage_key(user_role: str, user_principal_name: str, service_account: str, kv_client: KeyVaultClient) -> bool:
+    """Check if user can manage the selected key"""
+    if user_role == "admin":
+        return True
     
-    df = pd.DataFrame(key_data)
-    st.dataframe(df, use_container_width=True)
+    try:
+        metadata = kv_client.get_key_metadata(service_account)
+        created_by = metadata.get("created_by")
+        return created_by == user_principal_name
+    except:
+        return False
+
+def _rotate_key_interface(kv_client: KeyVaultClient, sf_client: SnowflakeClient, service_account: str, current_user: Dict):
+    """Interface for key rotation"""
+    user_principal_name = current_user.get('userPrincipalName')
     
-    # Key management actions
-    st.subheader("Key Actions")
-    selected_key = st.selectbox("Select Key to Manage", keys)
+    st.subheader(f"🔄 Rotate Key for {service_account}")
     
-    col1, col2, col3 = st.columns(3)
+    # Get current metadata
+    try:
+        metadata = kv_client.get_key_metadata(service_account)
+        snowflake_user = metadata.get("snowflake_user")
+        current_key_size = metadata.get("key_size", 2048)
+        
+        st.info(f"""
+        **Current Configuration:**
+        - Snowflake User: {snowflake_user}
+        - Current Key Size: {current_key_size} bits
+        - Last Modified: {metadata.get("last_modified", "Unknown")}
+        """)
+        
+        # Rotation options
+        with st.form(f"rotate_key_{service_account}"):
+            st.warning("⚠️ **Warning:** Key rotation will replace the existing key pair. The old private key will be permanently deleted.")
+            
+            new_key_size = st.selectbox(
+                "New Key Size:",
+                [2048, 3072, 4096],
+                index=[2048, 3072, 4096].index(current_key_size) if current_key_size in [2048, 3072, 4096] else 0
+            )
+            
+            rotation_reason = st.text_area(
+                "Rotation Reason (Optional):",
+                placeholder="e.g., Scheduled rotation, security compliance, suspected compromise"
+            )
+            
+            confirm_rotation = st.checkbox("I understand that this will replace the existing key pair")
+            
+            if st.form_submit_button("🔄 Confirm Rotation", disabled=not confirm_rotation):
+                if confirm_rotation:
+                    _process_key_rotation(kv_client, sf_client, service_account, current_user, new_key_size, rotation_reason, metadata)
+                else:
+                    st.error("Please confirm that you understand the implications of key rotation.")
     
-    with col1:
-        if st.button("Rotate Key"):
-            rotate_key(kv_client, sf_client, selected_key)
+    except Exception as e:
+        st.error(f"Failed to load key details: {str(e)}")
+
+def _process_key_rotation(kv_client: KeyVaultClient, sf_client: SnowflakeClient, service_account: str, 
+                         current_user: Dict, new_key_size: int, rotation_reason: str, old_metadata: Dict):
+    """Process the key rotation"""
+    user_principal_name = current_user.get('userPrincipalName')
+    progress_bar = st.progress(0, "Starting key rotation...")
     
-    with col2:
-        if st.button("Download Public Key"):
-            download_public_key(kv_client, selected_key)
+    try:
+        # Step 1: Generate new key pair
+        progress_bar.progress(25, "Generating new RSA key pair...")
+        private_key, public_key = generate_key_pair(new_key_size, user_principal_name)
+        
+        # Step 2: Store new keys in Key Vault
+        progress_bar.progress(50, "Storing new keys in Azure Key Vault...")
+        new_metadata = {
+            **old_metadata,
+            "key_size": new_key_size,
+            "last_modified": datetime.now().isoformat(),
+            "rotation_reason": rotation_reason,
+            "rotated_by": user_principal_name,
+            "previous_key_size": old_metadata.get("key_size", "unknown")
+        }
+        
+        kv_client.store_key_pair(service_account, private_key, public_key, new_metadata, user_principal_name)
+        
+        # Step 3: Update Snowflake user
+        progress_bar.progress(75, "Updating Snowflake user...")
+        snowflake_user = old_metadata.get("snowflake_user")
+        if snowflake_user:
+            sf_client.update_user_public_key(snowflake_user, public_key, user_principal_name)
+        
+        # Step 4: Complete
+        progress_bar.progress(100, "Key rotation complete!")
+        
+        st.success("🎉 Key rotation completed successfully!")
+        
+        # Show rotation summary
+        with st.expander("📋 Rotation Summary", expanded=True):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown(f"""
+                **Service Account:** {service_account}  
+                **Previous Key Size:** {old_metadata.get('key_size', 'Unknown')} bits  
+                **New Key Size:** {new_key_size} bits  
+                """)
+            
+            with col2:
+                st.markdown(f"""
+                **Rotated By:** {current_user.get('displayName', 'Unknown')}  
+                **Rotation Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  
+                **Reason:** {rotation_reason or 'Not specified'}  
+                """)
+        
+        # Log the rotation
+        sox_audit_logger.log_key_operation(
+            "ROTATED",
+            service_account, 
+            user_principal_name,
+            True,
+            key_size=new_key_size
+        )
+        
+    except Exception as e:
+        error_msg = str(e)
+        st.error(f"❌ Key rotation failed: {error_msg}")
+        logger.error(f"Key rotation failed for {service_account}: {error_msg}")
+        
+        sox_audit_logger.log_key_operation(
+            "ROTATED",
+            service_account,
+            user_principal_name, 
+            False,
+            error_message=error_msg
+        )
     
-    with col3:
-        if st.button("Delete Key", type="secondary"):
-            delete_key(kv_client, sf_client, selected_key)
+    finally:
+        progress_bar.empty()
+
+def _download_public_key_interface(kv_client: KeyVaultClient, service_account: str, current_user: Dict):
+    """Interface for downloading public key"""
+    user_principal_name = current_user.get('userPrincipalName')
+    
+    try:
+        public_key = kv_client.get_public_key(service_account, user_principal_name)
+        
+        # Clean the key for download
+        from utils.crypto_utils import crypto_utils
+        cleaned_key = crypto_utils.clean_pem_key(public_key)
+        
+        # Create download button
+        st.download_button(
+            label=f"📥 Download {service_account}_public_key.pem",
+            data=cleaned_key,
+            file_name=f"{service_account}_public_key.pem",
+            mime="text/plain",
+            help="Download the public key in PEM format"
+        )
+        
+        # Show key preview
+        with st.expander("🔍 Public Key Preview"):
+            st.code(cleaned_key, language="text")
+        
+        # Generate fingerprint
+        try:
+            fingerprint = crypto_utils.get_key_fingerprint(public_key)
+            st.info(f"**Key Fingerprint (SHA256):** `{fingerprint}`")
+        except Exception as e:
+            st.warning(f"Could not generate fingerprint: {str(e)}")
+        
+        st.success(f"✅ Public key for {service_account} is ready for download.")
+        
+    except Exception as e:
+        st.error(f"Failed to retrieve public key: {str(e)}")
+        logger.error(f"Public key download failed for {service_account}: {str(e)}")
+
+def _view_key_details_interface(kv_client: KeyVaultClient, service_account: str):
+    """Interface for viewing detailed key information"""
+    try:
+        metadata = kv_client.get_key_metadata(service_account)
+        
+        st.subheader(f"📋 Details for {service_account}")
+        
+        # Basic information
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown(f"""
+            **Service Account:** {service_account}  
+            **Snowflake User:** {metadata.get('snowflake_user', 'N/A')}  
+            **Usage Type:** {metadata.get('usage_type', 'N/A')}  
+            **Key Size:** {metadata.get('key_size', 'Unknown')} bits  
+            """)
+        
+        with col2:
+            st.markdown(f"""
+            **Created By:** {metadata.get('created_by', 'Unknown')}  
+            **Created At:** {metadata.get('created_at', 'Unknown')[:19] if metadata.get('created_at') else 'Unknown'}  
+            **Last Modified:** {metadata.get('last_modified', metadata.get('created_at', 'Unknown'))[:19] if metadata.get('last_modified') else 'Unknown'}  
+            **Rotated By:** {metadata.get('rotated_by', 'N/A')}  
+            """)
+        
+        if metadata.get('description'):
+            st.markdown(f"**Description:** {metadata['description']}")
+        
+        if metadata.get('rotation_reason'):
+            st.markdown(f"**Last Rotation Reason:** {metadata['rotation_reason']}")
+        
+        # Additional metadata
+        with st.expander("🔧 Technical Details"):
+            st.json(metadata)
+    
+    except Exception as e:
+        st.error(f"Failed to load key details: {str(e)}")
+
+def _delete_key_interface(kv_client: KeyVaultClient, sf_client: SnowflakeClient, service_account: str, current_user: Dict):
+    """Interface for deleting keys"""
+    user_principal_name = current_user.get('userPrincipalName')
+    
+    st.subheader(f"🗑️ Delete Key for {service_account}")
+    
+    st.error("⚠️ **DANGER ZONE** ⚠️")
+    st.warning("""
+    **This action cannot be undone!**
+    
+    Deleting this key pair will:
+    - Permanently remove the private key from Azure Key Vault
+    - Remove the public key from Azure Key Vault  
+    - Optionally remove the public key from the Snowflake user
+    - Break any applications currently using this key for authentication
+    """)
+    
+    # Get metadata for context
+    try:
+        metadata = kv_client.get_key_metadata(service_account)
+        snowflake_user = metadata.get('snowflake_user')
+        
+        with st.form(f"delete_key_{service_account}"):
+            st.markdown(f"**Service Account to Delete:** `{service_account}`")
+            st.markdown(f"**Associated Snowflake User:** `{snowflake_user}`")
+            
+            remove_from_snowflake = st.checkbox(
+                f"Also remove public key from Snowflake user '{snowflake_user}'",
+                value=True,
+                help="Recommended to prevent orphaned keys in Snowflake"
+            )
+            
+            deletion_reason = st.text_area(
+                "Deletion Reason (Required):",
+                placeholder="e.g., Service decommissioned, security incident, no longer needed"
+            )
+            
+            # Confirmation requirements
+            st.markdown("**Confirmation Required:**")
+            confirm_service_account = st.text_input(
+                f"Type '{service_account}' to confirm:",
+                placeholder=service_account
+            )
+            
+            confirm_understand = st.checkbox("I understand this action cannot be undone")
+            
+            # Validation
+            can_delete = (
+                confirm_service_account == service_account and
+                confirm_understand and
+                deletion_reason.strip()
+            )
+            
+            if st.form_submit_button("🗑️ DELETE KEY PAIR", disabled=not can_delete, type="secondary"):
+                if can_delete:
+                    _process_key_deletion(
+                        kv_client, sf_client, service_account, current_user, 
+                        snowflake_user, remove_from_snowflake, deletion_reason
+                    )
+                else:
+                    st.error("Please complete all confirmation requirements.")
+    
+    except Exception as e:
+        st.error(f"Failed to load key details: {str(e)}")
+
+def _process_key_deletion(kv_client: KeyVaultClient, sf_client: SnowflakeClient, service_account: str,
+                         current_user: Dict, snowflake_user: str, remove_from_snowflake: bool, deletion_reason: str):
+    """Process the key deletion"""
+    user_principal_name = current_user.get('userPrincipalName')
+    progress_bar = st.progress(0, "Starting key deletion...")
+    
+    try:
+        # Step 1: Remove from Snowflake if requested
+        if remove_from_snowflake and snowflake_user:
+            progress_bar.progress(33, "Removing public key from Snowflake...")
+            sf_client.remove_user_public_key(snowflake_user, user_principal_name)
+        
+        # Step 2: Delete from Key Vault
+        progress_bar.progress(66, "Deleting keys from Azure Key Vault...")
+        kv_client.delete_key(service_account, user_principal_name)
+        
+        # Step 3: Complete
+        progress_bar.progress(100, "Key deletion complete!")
+        
+        st.success("🗑️ Key pair deleted successfully!")
+        
+        # Show deletion summary
+        with st.expander("📋 Deletion Summary", expanded=True):
+            st.markdown(f"""
+            **Service Account:** {service_account} ✅ Deleted  
+            **Azure Key Vault:** ✅ Private and public keys removed  
+            **Snowflake User:** {'✅ Public key removed' if remove_from_snowflake else '⚠️ Public key not removed'}  
+            **Deleted By:** {current_user.get('displayName', 'Unknown')}  
+            **Deletion Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  
+            **Reason:** {deletion_reason}  
+            """)
+        
+        # Log the deletion
+        sox_audit_logger.log_key_operation(
+            "DELETED",
+            service_account,
+            user_principal_name,
+            True
+        )
+        
+        st.info("Please refresh the page to see updated key list.")
+        
+    except Exception as e:
+        error_msg = str(e)
+        st.error(f"❌ Key deletion failed: {error_msg}")
+        logger.error(f"Key deletion failed for {service_account}: {error_msg}")
+        
+        sox_audit_logger.log_key_operation(
+            "DELETED",
+            service_account,
+            user_principal_name,
+            False,
+            error_message=error_msg
+        )
+    
+    finally:
+        progress_bar.empty()
+
+def _generate_key_report(kv_client: KeyVaultClient, all_keys: List[str]):
+    """Generate comprehensive key report for admins"""
+    try:
+        st.subheader("📊 Key Management Report")
+        
+        report_data = []
+        key_sizes = {}
+        usage_types = {}
+        creators = {}
+        
+        for key in all_keys:
+            try:
+                metadata = kv_client.get_key_metadata(key)
+                
+                created_at = metadata.get("created_at", "Unknown")
+                if created_at != "Unknown":
+                    try:
+                        created_date = datetime.fromisoformat(created_at.replace("Z", ""))
+                        age_days = (datetime.now() - created_date).days
+                    except:
+                        age_days = -1
+                else:
+                    age_days = -1
+                
+                key_size = metadata.get("key_size", "Unknown")
+                usage_type = metadata.get("usage_type", "Unknown") 
+                creator = metadata.get("created_by", "Unknown")
+                
+                # Count statistics
+                key_sizes[key_size] = key_sizes.get(key_size, 0) + 1
+                usage_types[usage_type] = usage_types.get(usage_type, 0) + 1
+                creators[creator] = creators.get(creator, 0) + 1
+                
+                report_data.append({
+                    "Service Account": key,
+                    "Age (Days)": age_days if age_days >= 0 else "Unknown",
+                    "Key Size": f"{key_size} bits" if key_size != "Unknown" else "Unknown",
+                    "Usage Type": usage_type,
+                    "Creator": creator,
+                    "Snowflake User": metadata.get("snowflake_user", "N/A")
+                })
+                
+            except Exception as e:
+                logger.warning(f"Failed to process {key} for report: {str(e)}")
+        
+        # Display report
+        if report_data:
+            df = pd.DataFrame(report_data)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            
+            # Statistics
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.subheader("Key Sizes")
+                for size, count in sorted(key_sizes.items()):
+                    st.metric(f"{size} bits", count)
+            
+            with col2:
+                st.subheader("Usage Types")
+                for usage, count in sorted(usage_types.items()):
+                    st.metric(usage, count)
+            
+            with col3:
+                st.subheader("Top Creators")
+                for creator, count in sorted(creators.items(), key=lambda x: x[1], reverse=True)[:5]:
+                    st.metric(creator.split('@')[0] if '@' in creator else creator, count)
+        
+    except Exception as e:
+        st.error(f"Failed to generate report: {str(e)}")
+
+def _find_keys_needing_rotation(kv_client: KeyVaultClient, all_keys: List[str]):
+    """Find keys that need rotation based on age"""
+    try:
+        st.subheader("⚠️ Keys Needing Rotation")
+        
+        old_keys = []
+        very_old_keys = []
+        
+        for key in all_keys:
+            try:
+                metadata = kv_client.get_key_metadata(key)
+                created_at = metadata.get("created_at", "Unknown")
+                
+                if created_at != "Unknown":
+                    try:
+                        created_date = datetime.fromisoformat(created_at.replace("Z", ""))
+                        age_days = (datetime.now() - created_date).days
+                        
+                        if age_days > 730:  # 2 years
+                            very_old_keys.append({
+                                "Service Account": key,
+                                "Age": f"{age_days} days",
+                                "Priority": "🔴 High",
+                                "Creator": metadata.get("created_by", "Unknown")
+                            })
+                        elif age_days > 365:  # 1 year
+                            old_keys.append({
+                                "Service Account": key,
+                                "Age": f"{age_days} days", 
+                                "Priority": "🟡 Medium",
+                                "Creator": metadata.get("created_by", "Unknown")
+                            })
+                    except:
+                        pass
+            except:
+                pass
+        
+        if very_old_keys:
+            st.error(f"🔴 {len(very_old_keys)} keys are over 2 years old and need immediate rotation:")
+            df_very_old = pd.DataFrame(very_old_keys)
+            st.dataframe(df_very_old, use_container_width=True, hide_index=True)
+        
+        if old_keys:
+            st.warning(f"🟡 {len(old_keys)} keys are over 1 year old and should be rotated soon:")
+            df_old = pd.DataFrame(old_keys)
+            st.dataframe(df_old, use_container_width=True, hide_index=True)
+        
+        if not old_keys and not very_old_keys:
+            st.success("✅ All keys are within recommended rotation periods!")
+    
+    except Exception as e:
+        st.error(f"Failed to analyze key ages: {str(e)}")
 
 def show_usage_tracking():
     st.header("Usage Tracking")
