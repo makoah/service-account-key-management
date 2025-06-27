@@ -10,3 +10,4 @@ pytest-mock==3.12.0
 msal==1.24.1
 msal-extensions==1.0.0
 requests==2.31.0
+plotly==5.17.0
